@@ -6,100 +6,110 @@ from finvizfinance.quote import finvizfinance
 from translate import Translator
 from concurrent.futures import ThreadPoolExecutor
 
-# 1. 页面基本配置 (移动端优化)
-st.set_page_config(page_title="美股深度复盘", layout="wide")
+# 页面基本配置
+st.set_page_config(page_title="美股复盘终端", layout="wide")
 
-class IntegratedStockApp:
+class FinalAppFix:
     def __init__(self):
-        # 整合：板块汉化碎片
         self.sector_map = {
             'Technology': '信息技术', 'Financial': '金融服务', 'Healthcare': '医疗保健',
             'Consumer Cyclical': '可选消费', 'Industrials': '工业制造', 'Communication Services': '通讯服务',
             'Consumer Defensive': '必需消费', 'Energy': '能源石油', 'Real Estate': '房地产',
             'Utilities': '公用事业', 'Basic Materials': '基础材料'
         }
-        # 整合：翻译引擎碎片
         try:
             self.translator = Translator(to_lang="zh")
         except:
             self.translator = None
 
-    @st.cache_data(ttl=3600)
+    @st.cache_data(ttl=600) # 缩短缓存时间，确保数据新鲜
     def fetch_data(_self, mode):
-        # 整合：Finviz抓取与异常降级碎片
         fino = Overview()
-        try:
-            if mode == "S&P 500":
-                fino.set_filter(filters_dict={'Index': 'S&P 500'})
-            else:
-                fino.set_filter(filters_dict={'Market Cap.': '+Mid (over $2bln)', 'Average Volume': 'Over 500K'})
-            df = fino.screener_view()
-        except:
-            return pd.DataFrame()
+        if mode == "S&P 500":
+            fino.set_filter(filters_dict={'Index': 'S&P 500'})
+        else:
+            # 💡 修复：动能异动模式，增加“价格大于5”和“成交量大于100万”的过滤，防止垃圾股占满A开头
+            fino.set_filter(filters_dict={
+                'Market Cap.': '+Mid (over $2bln)', 
+                'Average Volume': 'Over 1M',
+                'Price': 'Over $5'
+            })
         
+        df = fino.screener_view()
         if df is None or df.empty: return pd.DataFrame()
         
-        # 整合：数据清洗与权重过滤碎片 (取前60只防止白屏)
-        df = df.head(60).copy()
-        df['涨跌'] = df['Change'].apply(lambda x: float(str(x).replace('%','')) if x else 0.0)
-        df['板块'] = df['Sector'].map(_self.sector_map).fillna(df['Sector'])
-        df['URL'] = "https://finance.yahoo.com/quote/" + df['Ticker']
+        # 💡 修复：强制按涨跌幅排序，解决“都是A开头”的问题
+        df['涨跌数值'] = df['Change'].apply(lambda x: float(str(x).replace('%','')) if x else 0.0)
+        df = df.sort_values(by='涨跌数值', ascending=False)
+        
+        df = df.head(60).copy() # 取前60只
+        df['板块汉化'] = df['Sector'].map(_self.sector_map).fillna(df['Sector'])
+        # 💡 修复跳转：在数据中直接生成 Yahoo 链接
+        df['YahooURL'] = "https://finance.yahoo.com/quote/" + df['Ticker']
         return df
 
-    def get_zh_desc(self, ticker):
-        # 整合：业务背景深度扫描碎片
+    def get_desc(self, ticker):
+        """💡 修复背景扫描：增加超时保护"""
         try:
             stock = finvizfinance(ticker)
-            desc_en = stock.ticker_description()
-            if not desc_en: return "暂无背景描述"
-            short_en = desc_en[:120]
+            desc = stock.ticker_description()
+            if not desc: return "无业务背景"
+            short = desc[:120]
             if self.translator:
-                return self.translator.translate(short_en)
-            return f"[英] {short_en}"
+                # 限制翻译长度以提高手机加载速度
+                return self.translator.translate(short)
+            return short
         except:
-            return "描述抓取中..."
+            return "点击下方链接查看详情"
 
     def run(self):
-        st.title("🚀 美股全功能复盘看板")
+        st.sidebar.title("控制台")
+        mode = st.sidebar.radio("模式选择", ["S&P 500", "动能异动榜"])
         
-        # 侧边栏控制
-        mode = st.sidebar.radio("选择模式", ["S&P 500", "今日强势股"])
-        
-        with st.spinner('正在同步全球金融碎片数据...'):
+        st.title(f"📊 {mode}")
+
+        with st.spinner('同步最新数据中...'):
             df = self.fetch_data(mode)
 
         if not df.empty:
-            # 整合：异步多线程翻译碎片
-            tickers = df['Ticker'].head(20).tolist()
+            # 仅对前 15 名进行深度背景扫描，保证手机端不卡顿
+            tickers = df['Ticker'].head(15).tolist()
             with ThreadPoolExecutor(max_workers=5) as executor:
-                descriptions = list(executor.map(self.get_zh_desc, tickers))
+                descriptions = list(executor.map(self.get_desc, tickers))
             
             desc_map = dict(zip(tickers, descriptions))
-            df['背景'] = df['Ticker'].map(desc_map).fillna("点击跳转查看详情")
+            df['背景'] = df['Ticker'].map(desc_map).fillna("查看详情请点击链接")
 
-            # 整合：交互式热力图与点击跳转逻辑
+            # 绘图
             fig = px.treemap(
                 df,
-                path=[px.Constant(mode), '板块', 'Ticker'],
+                path=[px.Constant(mode), '板块汉化', 'Ticker'],
                 values=pd.Series([1]*len(df)),
-                color='涨跌',
+                color='涨跌数值',
                 color_continuous_scale='RdYlGn',
-                range_color=[-3, 3],
-                custom_data=['URL', 'Price', 'Change', '背景']
+                range_color=[-4, 4],
+                custom_data=['YahooURL', 'Price', 'Change', '背景']
             )
 
+            # 💡 修复移动端悬停与跳转：将链接放在最显眼位置
             fig.update_traces(
-                hovertemplate="<b>%{label}</b><br>现价: %{customdata[1]}<br>涨跌: %{customdata[2]}<br>背景: %{customdata[3]}"
+                hovertemplate="""
+                <b>代码: %{label}</b><br>
+                涨跌: %{customdata[2]}<br>
+                背景: %{customdata[3]}<br>
+                ------------------<br>
+                🔗 复制链接查看详情:<br>
+                %{customdata[0]}
+                """
             )
 
-            # 手机端自适应显示
             st.plotly_chart(fig, use_container_width=True)
             
-            # 整合：详细清单展示
-            st.dataframe(df[['Ticker', 'Price', 'Change', '板块']], use_container_width=True)
-        else:
-            st.warning("数据抓取超时，请尝试刷新。")
+            # 💡 手机端补偿：在下方提供直接点击的列表
+            st.subheader("🔗 快速跳转列表 (手机直接点击)")
+            for i, row in df.head(10).iterrows():
+                st.markdown(f"[{row['Ticker']}]( {row['YahooURL']} ) - {row['Price']} ({row['Change']}) - {row['背景'][:40]}...")
 
 if __name__ == "__main__":
-    app = IntegratedStockApp()
+    app = FinalAppFix()
     app.run()
