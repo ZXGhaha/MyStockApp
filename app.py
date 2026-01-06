@@ -6,9 +6,9 @@ from finvizfinance.quote import finvizfinance
 from translate import Translator
 from concurrent.futures import ThreadPoolExecutor
 
-st.set_page_config(page_title="美股复盘终极版", layout="wide")
+st.set_page_config(page_title="美股复盘终极修复", layout="wide")
 
-class FinalStockApp:
+class FinalDiagnosticApp:
     def __init__(self):
         self.sector_map = {
             'Technology': '信息技术', 'Financial': '金融服务', 'Healthcare': '医疗保健',
@@ -24,11 +24,10 @@ class FinalStockApp:
     @st.cache_data(ttl=300)
     def fetch_data(_self, mode):
         fino = Overview()
-        # 1. 设置更严谨的过滤器
+        # 1. 设置过滤器
         if mode == "S&P 500":
             fino.set_filter(filters_dict={'Index': 'S&P 500'})
         else:
-            # 动能榜：过滤掉低价股和低成交量，专注活跃中大盘
             fino.set_filter(filters_dict={
                 'Market Cap.': '+Mid (over $2bln)',
                 'Average Volume': 'Over 1M',
@@ -36,24 +35,40 @@ class FinalStockApp:
             })
         
         df = fino.screener_view()
-        if df is None or df.empty: return pd.DataFrame()
+        
+        if df is None or df.empty:
+            return pd.DataFrame()
 
-        # 2. 核心修复：强制转换 Change 为数值进行排序
-        def clean_change(x):
+        # 💡 [核心修复1] 自动寻找包含 "Change" 字样的列名（解决表头偏移）
+        target_col = None
+        for col in df.columns:
+            if 'Change' in col:
+                target_col = col
+                break
+        
+        if not target_col:
+            st.error(f"找不到涨跌幅列，当前列名有: {df.columns.tolist()}")
+            return df
+
+        # 💡 [核心修复2] 暴力清洗：去除百分号、转浮点数
+        def force_float(val):
             try:
-                return float(str(x).replace('%', '').strip())
+                # 处理 "+2.50%" 或 "2.50" 甚至括号的情况
+                clean_val = str(val).replace('%', '').replace('+', '').strip()
+                return float(clean_val)
             except:
                 return 0.0
 
-        df['Change_Num'] = df['Change'].apply(clean_change)
+        df['Change_Value'] = df[target_col].apply(force_float)
         
-        # 3. 强制按涨幅从高到低排序，解决“A开头”问题
-        df = df.sort_values(by='Change_Num', ascending=False)
+        # 💡 [核心修复3] 强制降序排列（确保最高涨幅在最前）
+        df = df.sort_values(by='Change_Value', ascending=False)
         
-        # 4. 只取前 50 只最强的股票，确保加载速度
+        # 只取前 50 只
         df = df.head(50).copy()
         df['板块汉化'] = df['Sector'].map(_self.sector_map).fillna(df['Sector'])
         df['YahooURL'] = "https://finance.yahoo.com/quote/" + df['Ticker']
+        
         return df
 
     def get_desc(self, ticker):
@@ -61,61 +76,59 @@ class FinalStockApp:
             stock = finvizfinance(ticker)
             desc = stock.ticker_description()
             if not desc: return "无详细描述"
-            # 仅取一句话，防止手机端崩溃
-            short = desc.split('.')[0] 
+            short = desc.split('.')[0]
             if self.translator:
                 return self.translator.translate(short)
             return short
         except:
-            return "点击下方链接查看公司详情"
+            return "获取中..."
 
     def run(self):
-        st.sidebar.header("复盘配置")
-        mode = st.sidebar.selectbox("切换榜单", ["今日强势异动", "S&P 500"])
+        st.sidebar.header("配置")
+        mode = st.sidebar.selectbox("切换模式", ["动能异动榜", "S&P 500"])
         
-        st.title(f"🚀 {mode} (Top 50)")
+        st.title(f"🚀 {mode}")
 
-        with st.spinner('正在分析实时动能...'):
-            df = self.fetch_data(mode)
+        df = self.fetch_data(mode)
 
         if not df.empty:
-            # 5. 深度背景扫描 (仅限 Top 10，确保手机端秒开)
-            top_tickers = df['Ticker'].head(10).tolist()
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                descriptions = list(executor.map(self.get_desc, top_tickers))
+            # 💡 [核心修复4] 移动端跳转按钮：使用更稳定的 st.markdown 模拟按钮
+            st.write("### 🎯 深度调研 (点击以下代码跳转)")
             
-            desc_map = dict(zip(top_tickers, descriptions))
-            df['背景'] = df['Ticker'].map(desc_map).fillna("实时行情火热，点击下方链接深入了解")
+            # 展示前 10 名的跳转链接（解决手机端无法点击图表的问题）
+            top_10 = df.head(10)
+            cols = st.columns(5) # 手机端建议分两列，这里先用5列展示
+            for i, (idx, row) in enumerate(top_10.iterrows()):
+                with cols[i % 5]:
+                    color = "green" if row['Change_Value'] > 0 else "red"
+                    # 使用 Markdown 创建一个带颜色的大链接
+                    st.markdown(f"**[{row['Ticker']}]({row['YahooURL']})**")
+                    st.markdown(f"<span style='color:{color}'>{row['Change_Value']}%</span>", unsafe_allow_html=True)
 
-            # 6. 绘图：优化移动端显示
+            # 背景扫描 (Top 5)
+            with st.expander("查看核心公司业务背景"):
+                tickers = df['Ticker'].head(5).tolist()
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    descriptions = list(executor.map(self.get_desc, tickers))
+                for t, d in zip(tickers, descriptions):
+                    st.write(f"**{t}**: {d}")
+
+            # 绘图
             fig = px.treemap(
                 df,
                 path=[px.Constant(mode), '板块汉化', 'Ticker'],
                 values=pd.Series([1]*len(df)),
-                color='Change_Num',
+                color='Change_Value',
                 color_continuous_scale='RdYlGn',
                 range_color=[-4, 4],
-                custom_data=['YahooURL', 'Price', 'Change', '背景']
+                custom_data=['YahooURL', 'Price', target_col if 'target_col' in locals() else 'Change_Value']
             )
-
-            fig.update_traces(
-                hovertemplate="<b>%{label}</b><br>涨幅: %{customdata[2]}<br>背景: %{customdata[3]}"
-            )
-
+            
             st.plotly_chart(fig, use_container_width=True)
             
-            # 7. 终极跳转解决方案：手机端点击磁贴
-            st.write("### 🎯 深度调研 (直接点击跳转)")
-            # 采用分栏显示，节省手机空间
-            cols = st.columns(2)
-            for idx, row in df.head(10).iterrows():
-                with cols[idx % 2]:
-                    # 按钮样式跳转
-                    st.link_button(f"🔍 {row['Ticker']}: {row['Change']}", row['YahooURL'], use_container_width=True)
-                    st.caption(f"{row['背景']}")
         else:
-            st.error("数据加载失败，请刷新页面。")
+            st.warning("数据抓取中或筛选结果为空，请稍后...")
 
 if __name__ == "__main__":
-    app = FinalStockApp()
+    app = FinalDiagnosticApp()
     app.run()
